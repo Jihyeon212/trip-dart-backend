@@ -47,7 +47,7 @@ class PostResponse(BaseModel):
     title: str
     content: str
     nickname: str
-    route_data: list[dict[str, Any]] | None = None
+    route_data: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
