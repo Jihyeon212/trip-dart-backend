@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -20,6 +21,8 @@ from app.schemas.post import (
 )
 
 
+logger = logging.getLogger("uvicorn.error").getChild(__name__)
+
 router = APIRouter(
     prefix="/api/posts",
     tags=["Posts"],
@@ -28,26 +31,40 @@ router = APIRouter(
 DbSession = Annotated[Session, Depends(get_db)]
 
 
+def serialize_json_value(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    raise TypeError(f"JSON으로 직렬화할 수 없는 값입니다: {type(value).__name__}")
+
+
 def serialize_route_data(
     route_data: list[dict[str, Any]] | None,
 ) -> str | None:
     if route_data is None:
         return None
-    return json.dumps(route_data, ensure_ascii=False)
+    return json.dumps(
+        route_data,
+        ensure_ascii=False,
+        default=serialize_json_value,
+    )
 
 
 def deserialize_route_data(
     route_data: str | None,
-) -> list[dict[str, Any]] | None:
+) -> list[dict[str, Any]]:
     if not route_data:
-        return None
+        return []
 
     try:
         parsed_data = json.loads(route_data)
     except (json.JSONDecodeError, TypeError):
-        return None
+        logger.warning("게시글 route_data가 올바른 JSON 배열이 아닙니다.")
+        return []
 
-    return parsed_data if isinstance(parsed_data, list) else None
+    if not isinstance(parsed_data, list):
+        logger.warning("게시글 route_data JSON 값이 배열이 아닙니다.")
+        return []
+    return parsed_data
 
 
 def to_post_response(post: PostRecord) -> PostResponse:
@@ -140,6 +157,7 @@ def create_post(payload: PostCreate, db: DbSession) -> PostResponse:
         db.refresh(db_post)
     except SQLAlchemyError as error:
         db.rollback()
+        logger.exception("게시글 저장 중 DB 오류가 발생했습니다.")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="게시글 저장 중 오류가 발생했습니다.",
