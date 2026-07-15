@@ -1,55 +1,56 @@
 import json
+from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.models.post import PostRecord
-from app.schemas.post import PostCreate, PostResponse
+from app.schemas.post import (
+    PasswordRequest,
+    PasswordVerificationResponse,
+    PostCreate,
+    PostListItem,
+    PostListResponse,
+    PostResponse,
+    PostUpdate,
+)
 
 
-router = APIRouter()
+router = APIRouter(
+    prefix="/api/posts",
+    tags=["Posts"],
+)
 
-# FastAPI가 요청마다 get_db()를 실행해 Session을 넣어줍니다.
 DbSession = Annotated[Session, Depends(get_db)]
 
 
 def serialize_route_data(
     route_data: list[dict[str, Any]] | None,
 ) -> str | None:
-    """여행 코스 배열을 SQLite에 저장할 JSON 문자열로 변환합니다."""
     if route_data is None:
         return None
-
-    return json.dumps(
-        route_data,
-        ensure_ascii=False,
-    )
+    return json.dumps(route_data, ensure_ascii=False)
 
 
 def deserialize_route_data(
     route_data: str | None,
 ) -> list[dict[str, Any]] | None:
-    """SQLite에 저장된 JSON 문자열을 응답용 배열로 변환합니다."""
     if not route_data:
         return None
 
     try:
         parsed_data = json.loads(route_data)
-
-        if isinstance(parsed_data, list):
-            return parsed_data
-
-        return None
     except (json.JSONDecodeError, TypeError):
         return None
 
+    return parsed_data if isinstance(parsed_data, list) else None
+
 
 def to_post_response(post: PostRecord) -> PostResponse:
-    """SQLAlchemy PostRecord 객체를 API 응답 스키마로 변환합니다."""
     return PostResponse(
         id=post.id,
         post_type=post.post_type,
@@ -62,21 +63,60 @@ def to_post_response(post: PostRecord) -> PostResponse:
     )
 
 
-@router.get(
-    "",
-    response_model=list[PostResponse],
-)
+def get_post_or_404(post_id: int, db: Session) -> PostRecord:
+    post = db.get(PostRecord, post_id)
+    if post is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="게시글을 찾을 수 없습니다.",
+        )
+    return post
+
+
+def verify_post_password(post: PostRecord, password: str) -> None:
+    if post.password != password:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="비밀번호가 일치하지 않습니다.",
+        )
+
+
+@router.get("", response_model=PostListResponse)
 def list_posts(
     db: DbSession,
-) -> list[PostResponse]:
-    """게시글을 최신순으로 조회합니다."""
-    statement = select(PostRecord).order_by(PostRecord.id.desc())
+    page: Annotated[int, Query(ge=1)] = 1,
+    size: Annotated[int, Query(ge=1, le=100)] = 10,
+    keyword: str | None = None,
+) -> PostListResponse:
+    normalized_keyword = keyword.strip() if keyword else ""
+    filters = []
+    if normalized_keyword:
+        filters.append(
+            or_(
+                PostRecord.title.contains(normalized_keyword),
+                PostRecord.content.contains(normalized_keyword),
+            )
+        )
+
+    total_statement = select(func.count(PostRecord.id)).where(*filters)
+    total = db.scalar(total_statement) or 0
+
+    statement = (
+        select(PostRecord)
+        .where(*filters)
+        .order_by(PostRecord.created_at.desc(), PostRecord.id.desc())
+        .offset((page - 1) * size)
+        .limit(size)
+    )
     posts = db.scalars(statement).all()
 
-    return [
-        to_post_response(post)
-        for post in posts
-    ]
+    return PostListResponse(
+        items=[PostListItem.model_validate(post) for post in posts],
+        page=page,
+        size=size,
+        total=total,
+        total_pages=(total + size - 1) // size if total else 0,
+    )
 
 
 @router.post(
@@ -84,11 +124,7 @@ def list_posts(
     response_model=PostResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_post(
-    payload: PostCreate,
-    db: DbSession,
-) -> PostResponse:
-    """새 게시글을 생성합니다."""
+def create_post(payload: PostCreate, db: DbSession) -> PostResponse:
     db_post = PostRecord(
         post_type=payload.post_type,
         title=payload.title,
@@ -104,10 +140,86 @@ def create_post(
         db.refresh(db_post)
     except SQLAlchemyError as error:
         db.rollback()
-
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="게시글 저장 중 오류가 발생했습니다.",
         ) from error
 
     return to_post_response(db_post)
+
+
+@router.post(
+    "/{post_id}/verify-password",
+    response_model=PasswordVerificationResponse,
+)
+def verify_password(
+    post_id: Annotated[int, Path(ge=1)],
+    payload: PasswordRequest,
+    db: DbSession,
+) -> PasswordVerificationResponse:
+    post = get_post_or_404(post_id, db)
+    verify_post_password(post, payload.password)
+    return PasswordVerificationResponse(valid=True)
+
+
+@router.get("/{post_id}", response_model=PostResponse)
+def get_post(
+    post_id: Annotated[int, Path(ge=1)],
+    db: DbSession,
+) -> PostResponse:
+    post = get_post_or_404(post_id, db)
+    return to_post_response(post)
+
+
+@router.put("/{post_id}", response_model=PostResponse)
+def update_post(
+    post_id: Annotated[int, Path(ge=1)],
+    payload: PostUpdate,
+    db: DbSession,
+) -> PostResponse:
+    try:
+        post = get_post_or_404(post_id, db)
+        verify_post_password(post, payload.password)
+
+        post.post_type = payload.post_type
+        post.title = payload.title
+        post.content = payload.content
+        post.nickname = payload.nickname
+        post.route_data = serialize_route_data(payload.route_data)
+        post.updated_at = datetime.now()
+
+        db.commit()
+        db.refresh(post)
+    except SQLAlchemyError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="게시글 수정 중 오류가 발생했습니다.",
+        ) from error
+
+    return to_post_response(post)
+
+
+@router.delete(
+    "/{post_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_post(
+    post_id: Annotated[int, Path(ge=1)],
+    payload: PasswordRequest,
+    db: DbSession,
+) -> Response:
+    try:
+        post = get_post_or_404(post_id, db)
+        verify_post_password(post, payload.password)
+
+        db.delete(post)
+        db.commit()
+    except SQLAlchemyError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="게시글 삭제 중 오류가 발생했습니다.",
+        ) from error
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
