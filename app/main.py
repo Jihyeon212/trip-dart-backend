@@ -20,7 +20,7 @@ app = FastAPI(title="Trip Dart Backend", lifespan=lifespan, version="1.0.0")
 app.include_router(health.router)
 app.include_router(posts.router)
 app.include_router(locations.router, prefix="/locations", tags=["locations"])
-app.include_router(trips.router, prefix="/trips", tags=["trips"])
+app.include_router(trips.router)
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
 app.include_router(reports.router, prefix="/reports", tags=["reports"])
 
