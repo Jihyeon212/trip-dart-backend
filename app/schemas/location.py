@@ -1,12 +1,18 @@
 from pydantic import BaseModel
 
 
-class LocationBase(BaseModel):
-    name: str
+class Location(BaseModel):
+    contentid: str
+    contenttypeid: str
     category: str
-    latitude: float
+    category_name: str
+    title: str
+    addr1: str
+    addr2: str
+    tel: str
     longitude: float
-
-
-class LocationResponse(LocationBase):
-    id: int
+    latitude: float
+    image_url: str
+    thumbnail_url: str
+    sigungucode: str
+    distance_km: float | None = None

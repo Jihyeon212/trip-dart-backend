@@ -5,11 +5,13 @@ from fastapi import FastAPI
 
 from app.db.database import init_db
 from app.routers import chat, health, locations, posts, reports, trips
+from app.services.location_service import location_service
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db()
+    location_service.load_locations()
     yield
 
 
