@@ -21,7 +21,7 @@ from app.services.location_service import CATEGORY_CONFIG, location_service
 logger = logging.getLogger("uvicorn.error").getChild(__name__)
 
 MAX_RESULTS = 3
-DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
+DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 NO_RESULTS_ANSWER = "현재 제공된 광주 지역 데이터에서는 해당 정보를 찾지 못했습니다."
 
 CATEGORY_KEYWORDS = {
@@ -280,7 +280,7 @@ class ChatService:
             logger.info("OpenAI 키가 없어 챗봇 기본 응답을 사용합니다.")
             return None
 
-        model = (settings.openai_model or "").strip() or DEFAULT_OPENAI_MODEL
+        model = DEFAULT_OPENAI_MODEL
         try:
             client = OpenAI(api_key=api_key, timeout=15.0, max_retries=1)
             response = client.responses.create(

@@ -19,10 +19,112 @@ from app.schemas.report import (
 
 logger = logging.getLogger("uvicorn.error").getChild(__name__)
 
-DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
+DEFAULT_OPENAI_MODEL = "gpt-5-mini"
+REPORT_MAX_OUTPUT_TOKENS = 6000
+REPORT_OPENAI_TIMEOUT_SECONDS = 90.0
 DEFAULT_REPORT_TITLE = "AI가 정리해준 광주의 하루"
 DEFAULT_TIMELINE_DESCRIPTION = "별도의 후기가 작성되지 않았습니다."
 DEFAULT_OVERALL_REVIEW = "전체 여행 후기가 작성되지 않았습니다."
+
+REPORT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["title", "summary", "timelineDescriptions", "overallReview", "aiInsights"],
+    "properties": {
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "timelineDescriptions": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "overallReview": {"type": "string"},
+        "aiInsights": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "travelStyle",
+                "keywords",
+                "satisfactionPoints",
+                "disappointmentPoints",
+                "nextTripSuggestion",
+            ],
+            "properties": {
+                "travelStyle": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["title", "description"],
+                    "properties": {
+                        "title": {"type": "string", "maxLength": 50},
+                        "description": {"type": "string", "maxLength": 300},
+                    },
+                },
+                "keywords": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {"type": "string"},
+                },
+                "satisfactionPoints": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["title", "description", "evidence"],
+                        "properties": {
+                            "title": {"type": "string"},
+                            "description": {"type": "string"},
+                            "evidence": {
+                                "type": "array",
+                                "maxItems": 3,
+                                "items": {"type": "string", "maxLength": 200},
+                            },
+                        },
+                    },
+                },
+                "disappointmentPoints": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["title", "description", "evidence"],
+                        "properties": {
+                            "title": {"type": "string"},
+                            "description": {"type": "string"},
+                            "evidence": {
+                                "type": "array",
+                                "maxItems": 3,
+                                "items": {"type": "string", "maxLength": 200},
+                            },
+                        },
+                    },
+                },
+                "nextTripSuggestion": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["summary", "recommendedCategories"],
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "recommendedCategories": {
+                            "type": "array",
+                            "maxItems": 3,
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "tourist_spot",
+                                    "cultural_facility",
+                                    "leisure_sports",
+                                    "shopping",
+                                    "restaurant",
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
 
 REPORT_SYSTEM_PROMPT = """너는 사용자가 제공한 광주 여행 기록을 정리하고 분석하는 여행 리포트 작성 도우미다.
 반드시 제공된 방문 장소, 카테고리, 평점, 후기, 전체 후기, 추가 메모만 사용한다.
@@ -171,6 +273,17 @@ class ReportService:
             for source in sources
         )
 
+    def parse_ai_json(self, raw_text: str) -> dict[str, Any]:
+        stripped = raw_text.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            stripped = "\n".join(lines).strip()
+        return json.loads(stripped)
+
     def sanitize_points(
         self,
         points: list[InsightPoint],
@@ -245,6 +358,39 @@ class ReportService:
             for item in request.inputs.locations.values()
         )
 
+    def request_ai_result(
+        self,
+        client: OpenAI,
+        request: ReportGenerateRequest,
+        use_json_schema: bool,
+    ) -> AIReportResult:
+        create_kwargs: dict[str, Any] = {
+            "model": DEFAULT_OPENAI_MODEL,
+            "instructions": REPORT_SYSTEM_PROMPT,
+            "input": self.build_ai_context(request),
+            "max_output_tokens": REPORT_MAX_OUTPUT_TOKENS,
+        }
+        if use_json_schema:
+            create_kwargs["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": "report_generation_result",
+                    "schema": REPORT_JSON_SCHEMA,
+                    "strict": True,
+                }
+            }
+
+        response = client.responses.create(**create_kwargs)
+        raw_text = response.output_text.strip()
+        if not raw_text:
+            raise ValueError("OpenAI report response was empty")
+        payload = self.parse_ai_json(raw_text)
+        result = AIReportResult.model_validate(payload)
+        if len(result.timeline_descriptions) != len(request.visited_locations):
+            raise ValueError("timelineDescriptions length does not match visited_locations")
+        result.ai_insights = self.sanitize_ai_insights(result.ai_insights, request)
+        return result
+
     def generate_ai_content(self, request: ReportGenerateRequest) -> AIReportResult | None:
         api_key = (settings.openai_api_key or "").strip()
         if not api_key:
@@ -260,39 +406,70 @@ class ReportService:
             )
             return None
 
-        model = (settings.openai_model or "").strip() or DEFAULT_OPENAI_MODEL
         try:
-            client = OpenAI(api_key=api_key, timeout=15.0, max_retries=1)
-            response = client.responses.create(
-                model=model,
-                instructions=REPORT_SYSTEM_PROMPT,
-                input=self.build_ai_context(request),
-                max_output_tokens=1200,
+            client = OpenAI(
+                api_key=api_key,
+                timeout=REPORT_OPENAI_TIMEOUT_SECONDS,
+                max_retries=1,
             )
-            raw_text = response.output_text.strip()
-            if not raw_text:
-                raise ValueError("OpenAI report response was empty")
-            payload = json.loads(raw_text)
-            result = AIReportResult.model_validate(payload)
-            if len(result.timeline_descriptions) != len(request.visited_locations):
-                raise ValueError("timelineDescriptions length does not match visited_locations")
-            result.ai_insights = self.sanitize_ai_insights(result.ai_insights, request)
-            logger.info(
-                "AI report generation succeeded for %d locations.",
-                len(request.visited_locations),
-            )
-            return result
+            last_error: Exception | None = None
+            for attempt_name, use_json_schema in (
+                ("json_schema", True),
+                ("plain_json", False),
+            ):
+                try:
+                    result = self.request_ai_result(
+                        client,
+                        request,
+                        use_json_schema=use_json_schema,
+                    )
+                    logger.info(
+                        "AI report generation succeeded. locations=%d model=%s attempt=%s",
+                        len(request.visited_locations),
+                        DEFAULT_OPENAI_MODEL,
+                        attempt_name,
+                    )
+                    return result
+                except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+                    last_error = exc
+                    logger.info(
+                        "AI report response was invalid. locations=%d model=%s attempt=%s error=%s",
+                        len(request.visited_locations),
+                        DEFAULT_OPENAI_MODEL,
+                        attempt_name,
+                        exc.__class__.__name__,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    logger.info(
+                        "OpenAI report generation attempt failed. locations=%d model=%s attempt=%s error=%s",
+                        len(request.visited_locations),
+                        DEFAULT_OPENAI_MODEL,
+                        attempt_name,
+                        exc.__class__.__name__,
+                    )
+
+            if last_error:
+                logger.info(
+                    "OpenAI report generation failed; using fallback. locations=%d model=%s last_error=%s",
+                    len(request.visited_locations),
+                    DEFAULT_OPENAI_MODEL,
+                    last_error.__class__.__name__,
+                )
+            return None
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             logger.info(
-                "AI report response was invalid; using fallback. locations=%d error=%s",
+                "AI report response was invalid; using fallback. locations=%d model=%s error=%s",
                 len(request.visited_locations),
+                DEFAULT_OPENAI_MODEL,
                 exc.__class__.__name__,
             )
             return None
         except Exception as exc:
             logger.info(
-                "OpenAI report generation failed; using fallback. locations=%d error=%s",
+                "OpenAI report generation failed; using fallback. locations=%d model=%s error=%s",
                 len(request.visited_locations),
+                DEFAULT_OPENAI_MODEL,
                 exc.__class__.__name__,
             )
             return None

@@ -170,6 +170,29 @@ class ReportServiceTest(unittest.TestCase):
         self.assertNotIn("tel", openai_input)
         self.assertNotIn("address", openai_input)
 
+    def test_ai_retries_plain_json_when_json_schema_attempt_fails(self) -> None:
+        create = Mock(
+            side_effect=[
+                RuntimeError("json schema not supported"),
+                SimpleNamespace(output_text=ai_output()),
+            ]
+        )
+        client = SimpleNamespace(responses=SimpleNamespace(create=create))
+
+        with patch("app.services.report_service.settings.openai_api_key", "test-key"), patch(
+            "app.services.report_service.OpenAI",
+            return_value=client,
+        ):
+            result = self.service.generate_report(make_request())
+
+        self.assertEqual(result.title, "AI title")
+        self.assertIsNotNone(result.ai_insights)
+        self.assertEqual(create.call_count, 2)
+        self.assertEqual(create.call_args_list[0].kwargs["model"], "gpt-5-mini")
+        self.assertEqual(create.call_args_list[1].kwargs["model"], "gpt-5-mini")
+        self.assertIn("text", create.call_args_list[0].kwargs)
+        self.assertNotIn("text", create.call_args_list[1].kwargs)
+
     def test_ai_invalid_json_wrong_description_count_missing_insights_and_exception_fallback(self) -> None:
         invalid_outputs = (
             "not json",
