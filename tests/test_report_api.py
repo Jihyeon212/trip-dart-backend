@@ -62,8 +62,10 @@ class ReportApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(set(data), {"title", "summary", "timeline", "overallReview"})
+        self.assertEqual(set(data), {"title", "summary", "timeline", "overallReview", "aiInsights"})
         self.assertNotIn("overall_review", data)
+        self.assertNotIn("ai_insights", data)
+        self.assertIsNone(data["aiInsights"])
         self.assertEqual([item["place"] for item in data["timeline"]], ["Lunch Spot", "Museum"])
         self.assertEqual(data["timeline"][0]["time"], "13:30")
         self.assertEqual(data["timeline"][0]["rating"], 5)
@@ -79,6 +81,42 @@ class ReportApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["timeline"][0]["place"], "Lunch Spot")
+        self.assertIsNone(response.json()["aiInsights"])
+
+    def test_ai_success_returns_camel_case_insights(self) -> None:
+        output_text = (
+            '{"title":"AI title","summary":"AI summary",'
+            '"timelineDescriptions":["AI first","AI second"],'
+            '"overallReview":"AI overall",'
+            '"aiInsights":{'
+            '"travelStyle":{"title":"Food focused","description":"This trip shows a food-focused tendency."},'
+            '"keywords":["Food"],'
+            '"satisfactionPoints":[{"title":"Lunch","description":"Positive lunch review.","evidence":["Lunch was good."]}],'
+            '"disappointmentPoints":[],'
+            '"nextTripSuggestion":{"summary":"Try similar categories next time.","recommendedCategories":["restaurant"]}'
+            '}'
+            '}'
+        )
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        create = Mock(return_value=SimpleNamespace(output_text=output_text))
+        client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        with patch("app.services.report_service.settings.openai_api_key", "test-key"), patch(
+            "app.services.report_service.OpenAI",
+            return_value=client,
+        ):
+            response = self.client.post("/api/reports/generate", json=request_body())
+
+        self.assertEqual(response.status_code, 200)
+        insights = response.json()["aiInsights"]
+        self.assertIn("travelStyle", insights)
+        self.assertIn("satisfactionPoints", insights)
+        self.assertIn("disappointmentPoints", insights)
+        self.assertIn("nextTripSuggestion", insights)
+        self.assertIn("recommendedCategories", insights["nextTripSuggestion"])
+        self.assertNotIn("travel_style", insights)
+        self.assertNotIn("recommended_categories", insights["nextTripSuggestion"])
 
     def test_invalid_rating_and_empty_locations_return_422(self) -> None:
         invalid_rating = request_body()

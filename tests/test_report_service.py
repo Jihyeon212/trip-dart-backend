@@ -52,6 +52,28 @@ def make_request() -> ReportGenerateRequest:
     )
 
 
+def ai_output() -> str:
+    return (
+        '{"title":"AI title","summary":"AI summary",'
+        '"timelineDescriptions":["AI first","AI second"],'
+        '"overallReview":"AI overall",'
+        '"aiInsights":{'
+        '"travelStyle":{"title":"Food focused","description":"This trip shows a food-focused tendency."},'
+        '"keywords":["Food","Food","Gwangju","Extra"],'
+        '"satisfactionPoints":['
+        '{"title":"Lunch satisfaction","description":"The lunch review was positive.","evidence":["Good lunch."]},'
+        '{"title":"Made up","description":"This should be removed.","evidence":["Friendly staff."]}'
+        '],'
+        '"disappointmentPoints":['
+        '{"title":"No evidence","description":"This should be removed.","evidence":["Too crowded."]}'
+        '],'
+        '"nextTripSuggestion":{"summary":"Keep restaurant-centered categories.",'
+        '"recommendedCategories":["restaurant","restaurant","unknown","shopping","tourist_spot","leisure_sports"]}'
+        '}'
+        '}'
+    )
+
+
 class ReportSchemaTest(unittest.TestCase):
     def test_camel_case_request_aliases_are_mapped(self) -> None:
         request = make_request()
@@ -63,9 +85,7 @@ class ReportSchemaTest(unittest.TestCase):
         self.assertEqual(request.inputs.overall_review, "A good day in Gwangju.")
 
     def test_invalid_rating_time_empty_locations_and_duplicates_fail(self) -> None:
-        base = make_request().model_dump(by_alias=True)
-
-        invalid_rating = dict(base)
+        invalid_rating = make_request().model_dump(by_alias=True)
         invalid_rating["inputs"]["locations"]["1"]["rating"] = 6
         with self.assertRaises(Exception):
             ReportGenerateRequest.model_validate(invalid_rating)
@@ -100,25 +120,19 @@ class ReportServiceTest(unittest.TestCase):
         self.assertEqual(result.timeline[1].time, "")
         self.assertIsNone(result.timeline[1].rating)
         self.assertEqual(result.timeline[1].description, DEFAULT_TIMELINE_DESCRIPTION)
+        self.assertIsNone(result.ai_insights)
         self.assertNotIn("Should be ignored.", result.model_dump_json())
 
-    def test_missing_openai_key_uses_fallback(self) -> None:
+    def test_missing_openai_key_uses_fallback_with_null_insights(self) -> None:
         with patch("app.services.report_service.settings.openai_api_key", None):
             result = self.service.generate_report(make_request())
 
         self.assertEqual(result.title, "AI가 정리해준 광주의 하루")
         self.assertEqual(result.timeline[0].description, "Good lunch.")
+        self.assertIsNone(result.ai_insights)
 
-    def test_ai_success_changes_only_ai_owned_fields(self) -> None:
-        create = Mock(
-            return_value=SimpleNamespace(
-                output_text=(
-                    '{"title":"AI title","summary":"AI summary",'
-                    '"timelineDescriptions":["AI first","AI second"],'
-                    '"overallReview":"AI overall"}'
-                )
-            )
-        )
+    def test_ai_success_changes_only_ai_owned_fields_and_sanitizes_insights(self) -> None:
+        create = Mock(return_value=SimpleNamespace(output_text=ai_output()))
         client = SimpleNamespace(responses=SimpleNamespace(create=create))
 
         with patch("app.services.report_service.settings.openai_api_key", "test-key"), patch(
@@ -137,13 +151,32 @@ class ReportServiceTest(unittest.TestCase):
                 ("", "Second Place", None, "AI second"),
             ],
         )
+
+        self.assertIsNotNone(result.ai_insights)
+        assert result.ai_insights is not None
+        self.assertEqual(result.ai_insights.keywords, ["Food", "Gwangju", "Extra"])
+        self.assertEqual(len(result.ai_insights.satisfaction_points), 1)
+        self.assertEqual(result.ai_insights.satisfaction_points[0].evidence, ["Good lunch."])
+        self.assertEqual(result.ai_insights.disappointment_points, [])
+        self.assertEqual(
+            result.ai_insights.next_trip_suggestion.recommended_categories,
+            ["restaurant", "shopping", "tourist_spot"],
+        )
+
         openai_input = create.call_args.kwargs["input"]
         self.assertIn("First Place", openai_input)
+        self.assertIn('"category": "restaurant"', openai_input)
         self.assertNotIn("distanceKm", openai_input)
         self.assertNotIn("tel", openai_input)
+        self.assertNotIn("address", openai_input)
 
-    def test_ai_invalid_json_wrong_description_count_and_exception_fallback(self) -> None:
-        for output_text in ("not json", '{"title":"T","summary":"S","timelineDescriptions":["one"],"overallReview":"O"}'):
+    def test_ai_invalid_json_wrong_description_count_missing_insights_and_exception_fallback(self) -> None:
+        invalid_outputs = (
+            "not json",
+            '{"title":"T","summary":"S","timelineDescriptions":["one"],"overallReview":"O","aiInsights":{}}',
+            '{"title":"T","summary":"S","timelineDescriptions":["one","two"],"overallReview":"O"}',
+        )
+        for output_text in invalid_outputs:
             create = Mock(return_value=SimpleNamespace(output_text=output_text))
             client = SimpleNamespace(responses=SimpleNamespace(create=create))
             with patch("app.services.report_service.settings.openai_api_key", "test-key"), patch(
@@ -152,6 +185,7 @@ class ReportServiceTest(unittest.TestCase):
             ):
                 result = self.service.generate_report(make_request())
             self.assertEqual(result.title, "AI가 정리해준 광주의 하루")
+            self.assertIsNone(result.ai_insights)
 
         with patch("app.services.report_service.settings.openai_api_key", "test-key"), patch(
             "app.services.report_service.OpenAI",
@@ -159,6 +193,7 @@ class ReportServiceTest(unittest.TestCase):
         ):
             result = self.service.generate_report(make_request())
         self.assertEqual(result.title, "AI가 정리해준 광주의 하루")
+        self.assertIsNone(result.ai_insights)
 
 
 if __name__ == "__main__":
