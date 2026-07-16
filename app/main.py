@@ -23,7 +23,7 @@ app.include_router(posts.router)
 app.include_router(locations.router, prefix="/locations", tags=["locations"])
 app.include_router(trips.router)
 app.include_router(chat.router)
-app.include_router(reports.router, prefix="/reports", tags=["reports"])
+app.include_router(reports.router)
 
 
 @app.get("/")
