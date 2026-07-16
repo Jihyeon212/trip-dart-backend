@@ -22,6 +22,8 @@ logger = logging.getLogger("uvicorn.error").getChild(__name__)
 
 MAX_RESULTS = 3
 DEFAULT_OPENAI_MODEL = "gpt-5-mini"
+CHAT_MAX_OUTPUT_TOKENS = 1200
+CHAT_OPENAI_TIMEOUT_SECONDS = 45.0
 NO_RESULTS_ANSWER = "현재 제공된 광주 지역 데이터에서는 해당 정보를 찾지 못했습니다."
 
 CATEGORY_KEYWORDS = {
@@ -282,12 +284,16 @@ class ChatService:
 
         model = DEFAULT_OPENAI_MODEL
         try:
-            client = OpenAI(api_key=api_key, timeout=15.0, max_retries=1)
+            client = OpenAI(
+                api_key=api_key,
+                timeout=CHAT_OPENAI_TIMEOUT_SECONDS,
+                max_retries=1,
+            )
             response = client.responses.create(
                 model=model,
                 instructions=SYSTEM_PROMPT,
                 input=self._build_openai_input(message, locations, posts, current_route),
-                max_output_tokens=500,
+                max_output_tokens=CHAT_MAX_OUTPUT_TOKENS,
             )
             answer = response.output_text.strip()
             if not answer:
